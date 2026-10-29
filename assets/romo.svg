@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <title>Romo</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#232327"/>
+      <stop offset="1" stop-color="#09090b"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#tile)"/>
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="27.25" fill="none" stroke="#3f3f46" stroke-width="1.5"/>
+  <!-- An "r" whose arm runs into an "o": a connector reaching an idea. -->
+  <g transform="translate(64 64) scale(0.92) translate(-27 -17)" fill="none" stroke="#fafafa" stroke-width="12" stroke-linecap="round">
+    <path d="M0 48V18A18 18 0 0 1 18 0H26"/>
+    <circle cx="40" cy="0" r="14"/>
+  </g>
+</svg>

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Romo
+Comment=A little room for big ideas
+Exec=romo %f
+Icon=romo
+Terminal=false
+Categories=Graphics;Office;
+MimeType=application/x-romo;
+
