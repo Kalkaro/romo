@@ -14,7 +14,7 @@ Use bundled Inter. Interface text is 13–15 px, board text defaults to 32 px, a
 
 There is no header: the board fills the window and every control floats above it. The top bar sits in the top-left corner and uses the same panel and icon buttons as the tools: **Save** in the corner, the File menu, the Romo mark with the current board name as a simple board picker, then undo and redo. Long board names truncate with an ellipsis. Menus open directly below their buttons. Do not display “Draft saved locally,” save-state labels, or the bottom tool-instruction sentence. The picker lists stored boards and provides New board, Import board, and Rename current board.
 
-Tools float along the left edge, centered between the corner panels; their spacing tightens when the window is too short for the regular rhythm. Help, Settings, grid, and object count sit at the bottom left. Zoom, fit, and the optional minimap sit at the bottom right. Notices appear in the top-right corner. Use 24 px edge spacing, 36 px icon hit areas, 4 px button corners, 8 px panel corners, and 1 px borders.
+Tools float along the left edge, centered between the corner panels; their spacing tightens when the window is too short for the regular rhythm. Help, Settings, grid, and object count sit at the bottom left. Zoom, fit, and the optional minimap sit at the bottom right. Notices appear in the top-right corner, fading in over 150 ms and out over 300 ms before they are removed. Use 24 px edge spacing, 36 px icon hit areas, 4 px button corners, 8 px panel corners, and 1 px borders.
 
 ## Mark and icons
 
@@ -42,7 +42,7 @@ Text is edited **directly on the canvas**, without a text-entry popup. Preserve 
 
 ## Board-only mode
 
-**Y** toggles board-only mode without moving the board. Fade the interface out and back in over 200 ms with gentle easing; pressing Y during the transition reverses the fade from its current opacity. Fade application chrome only, keeping board objects, selection outlines, handles, and guides fully visible. The board always fills the window, so the fade never shifts it. Hide the top bar, toolbars, menus, settings, hints, minimap, and other application chrome. The object toolbar still opens with right-click or Shift+F10, at full opacity. Preserve all board functionality: selection outlines, marquee selection, movement, resize handles, snapping guides, drawing, keyboard shortcuts, and inline text editing. While typing, Y inserts a letter.
+**Y** toggles board-only mode without moving the board. Fade the interface out and back in over 200 ms with gentle easing; pressing Y during the transition reverses the fade from its current opacity. Fade application chrome only, keeping board objects, selection outlines, handles, guides, and notices such as "Board saved" fully visible. The board always fills the window, so the fade never shifts it. Hide the top bar, toolbars, menus, settings, hints, minimap, and other application chrome. The object toolbar still opens with right-click or Shift+F10, at full opacity. Preserve all board functionality: selection outlines, marquee selection, movement, resize handles, snapping guides, drawing, keyboard shortcuts, and inline text editing. While typing, Y inserts a letter.
 
 ## Images and snapping
 

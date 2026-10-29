@@ -22,6 +22,9 @@ use std::{
 };
 
 const DECLUTTER_FADE: Duration = Duration::from_millis(200);
+/// A notice fades in over this long, and out again before it is removed.
+const TOAST_FADE_IN: Duration = Duration::from_millis(150);
+const TOAST_FADE_OUT: Duration = Duration::from_millis(300);
 /// Eraser reach around the pointer, in screen pixels.
 const ERASER_RADIUS: f32 = 10.0;
 /// How long the eraser's trail lingers.
@@ -221,6 +224,37 @@ struct Bench {
     samples: Vec<(&'static str, f32, f32)>,
 }
 
+/// A notice in the top-right corner. It fades in, holds, and fades out.
+struct Toast {
+    message: String,
+    error: bool,
+    since: Instant,
+    /// A timer is set to repaint when the fade-out starts.
+    woken: bool,
+}
+
+impl Toast {
+    /// How long it stays, fade included. Errors stay longer.
+    fn lifetime(&self) -> Duration {
+        Duration::from_secs(if self.error { 12 } else { 4 })
+    }
+    fn expired(&self, now: Instant) -> bool {
+        now.duration_since(self.since) >= self.lifetime()
+    }
+    fn opacity(&self, now: Instant) -> f32 {
+        let age = now.duration_since(self.since);
+        let left = self.lifetime().saturating_sub(age);
+        let fading_in = age.as_secs_f32() / TOAST_FADE_IN.as_secs_f32();
+        let fading_out = left.as_secs_f32() / TOAST_FADE_OUT.as_secs_f32();
+        smoothstep(fading_in.min(fading_out).clamp(0.0, 1.0))
+    }
+}
+
+/// Gentle easing of `t`, from 0 to 1.
+fn smoothstep(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
 pub struct Romo {
     board: Board,
     paint_cache: paint::Cache,
@@ -246,7 +280,7 @@ pub struct Romo {
     written: Arc<Mutex<u64>>,
     /// An autosave is being written in the background.
     saving: bool,
-    toast: Option<(String, bool, Instant)>,
+    toast: Option<Toast>,
     show_help: bool,
     show_grid: bool,
     snap: bool,
@@ -338,8 +372,7 @@ impl Romo {
             Some((start, from)) => {
                 let t = (now.duration_since(start).as_secs_f32() / DECLUTTER_FADE.as_secs_f32())
                     .clamp(0.0, 1.0);
-                let eased = t * t * (3.0 - 2.0 * t);
-                from + (target - from) * eased
+                from + (target - from) * smoothstep(t)
             }
             None => target,
         }
@@ -1123,12 +1156,6 @@ impl Romo {
                             app.autosave(cx);
                             cx.notify();
                         }
-                        if app.toast.as_ref().is_some_and(|(_, error, time)| {
-                            time.elapsed() > Duration::from_secs(if *error { 12 } else { 4 })
-                        }) {
-                            app.toast = None;
-                            cx.notify();
-                        }
                     })
                     .is_err()
                 {
@@ -1140,7 +1167,19 @@ impl Romo {
         app
     }
     fn notify(&mut self, message: impl Into<String>, error: bool) {
-        self.toast = Some((message.into(), error, Instant::now()));
+        let now = Instant::now();
+        // A notice that replaces one still showing doesn't fade in again.
+        let showing = self.toast.as_ref().is_some_and(|toast| !toast.expired(now));
+        self.toast = Some(Toast {
+            message: message.into(),
+            error,
+            since: if showing {
+                now.checked_sub(TOAST_FADE_IN).unwrap_or(now)
+            } else {
+                now
+            },
+            woken: false,
+        });
     }
     /// Tablet pens, which GPUI doesn't deliver, arrive as mouse input. On a
     /// control they press it; anywhere else they act on the board like a mouse.
@@ -3418,6 +3457,25 @@ impl Render for Romo {
         if self.chrome_fade.is_some() {
             window.request_animation_frame();
         }
+        if self.toast.as_ref().is_some_and(|toast| toast.expired(now)) {
+            self.toast = None;
+        }
+        if let Some(toast) = &mut self.toast {
+            let age = now.duration_since(toast.since);
+            let fade_out = toast.lifetime() - TOAST_FADE_OUT;
+            if age < TOAST_FADE_IN || age >= fade_out {
+                window.request_animation_frame();
+            } else if !toast.woken {
+                // Nothing repaints during the hold, so ask for a frame when it ends.
+                toast.woken = true;
+                let wait = fade_out - age;
+                cx.spawn(async move |entity, cx| {
+                    gpui::Timer::after(wait).await;
+                    entity.update(cx, |_, cx| cx.notify()).ok();
+                })
+                .detach();
+            }
+        }
         self.step_bench(window, cx);
         self.sync_inline_editor(window, cx);
         let eraser = self
@@ -3707,21 +3765,23 @@ impl Render for Romo {
             if self.show_map {
                 chrome = chrome.child(self.minimap(cx));
             }
-            if let Some((message, error, _)) = &self.toast {
-                chrome = chrome.child(
-                    panel()
-                        .absolute()
-                        .top_6()
-                        .right_6()
-                        .max_w(px(320.0))
-                        .px_4()
-                        .py_3()
-                        .text_size(px(13.0))
-                        .text_color(rgb(if *error { 0xdc2626 } else { FG }))
-                        .child(message.clone()),
-                );
-            }
             body = body.child(chrome);
+        }
+        // Notices stay visible in board-only mode, so they sit outside the chrome.
+        if let Some(toast) = &self.toast {
+            body = body.child(
+                panel()
+                    .absolute()
+                    .top_6()
+                    .right_6()
+                    .max_w(px(320.0))
+                    .px_4()
+                    .py_3()
+                    .text_size(px(13.0))
+                    .text_color(rgb(if toast.error { 0xdc2626 } else { FG }))
+                    .opacity(toast.opacity(now))
+                    .child(toast.message.clone()),
+            );
         }
         // The object toolbar opens on request, so it stays available in board-only mode.
         if !self.selected.is_empty()
@@ -3766,5 +3826,30 @@ impl Render for Romo {
             root = root.child(self.edit_modal(edit, cx));
         }
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_notice_fades_in_holds_and_fades_out() {
+        let since = Instant::now();
+        let toast = Toast {
+            message: "Board saved".into(),
+            error: false,
+            since,
+            woken: false,
+        };
+        let at = |millis| toast.opacity(since + Duration::from_millis(millis));
+        assert_eq!(at(0), 0.0);
+        assert!(at(75) > 0.0 && at(75) < 1.0);
+        assert_eq!(at(150), 1.0);
+        assert_eq!(at(3000), 1.0);
+        assert!(at(3850) > 0.0 && at(3850) < 1.0);
+        assert_eq!(at(4000), 0.0);
+        assert!(!toast.expired(since + Duration::from_millis(3999)));
+        assert!(toast.expired(since + Duration::from_millis(4000)));
     }
 }
