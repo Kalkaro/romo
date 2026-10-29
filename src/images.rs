@@ -1,7 +1,7 @@
 use crate::geometry::Rect;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use gpui::RenderImage;
-use image::ImageReader;
+use image::{DynamicImage, ImageReader};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{io::Cursor, sync::Arc};
 
@@ -42,35 +42,43 @@ impl<'de> Deserialize<'de> for ImageAsset {
         let bytes = STANDARD
             .decode(&encoded.png)
             .map_err(serde::de::Error::custom)?;
-        let mut asset = Self::from_bytes(&bytes).map_err(serde::de::Error::custom)?;
-        if (asset.width, asset.height) != (encoded.width, encoded.height) {
+        // The board already holds the PNG, so it is only decoded for display.
+        let decoded =
+            decode(&bytes, Some(image::ImageFormat::Png)).map_err(serde::de::Error::custom)?;
+        if (decoded.width(), decoded.height()) != (encoded.width, encoded.height) {
             return Err(serde::de::Error::custom(
                 "Image dimensions do not match its data",
             ));
         }
-        asset.png = encoded.png;
-        Ok(asset)
+        Ok(Self::new(encoded.png, decoded))
     }
+}
+/// Decode image data, guessing its format unless given, within Romo's limits.
+fn decode(bytes: &[u8], format: Option<image::ImageFormat>) -> Result<DynamicImage, String> {
+    if bytes.len() > 9 * 1024 * 1024 {
+        return Err("Images must be smaller than 9 MB.".into());
+    }
+    let mut reader = ImageReader::new(Cursor::new(bytes));
+    match format {
+        Some(format) => reader.set_format(format),
+        None => reader = reader.with_guessed_format().map_err(|e| e.to_string())?,
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .map_err(|e| format!("Cannot read image: {e}"))?;
+    if u64::from(decoded.width()) * u64::from(decoded.height()) > 16_000_000 {
+        return Err("Images must contain fewer than 16 million pixels.".into());
+    }
+    Ok(decoded)
 }
 impl ImageAsset {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() > 9 * 1024 * 1024 {
-            return Err("Images must be smaller than 9 MB.".into());
-        }
-        let mut reader = ImageReader::new(Cursor::new(bytes))
-            .with_guessed_format()
-            .map_err(|e| e.to_string())?;
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(8192);
-        limits.max_image_height = Some(8192);
-        limits.max_alloc = Some(128 * 1024 * 1024);
-        reader.limits(limits);
-        let decoded = reader
-            .decode()
-            .map_err(|e| format!("Cannot read image: {e}"))?;
-        if u64::from(decoded.width()) * u64::from(decoded.height()) > 16_000_000 {
-            return Err("Images must contain fewer than 16 million pixels.".into());
-        }
+        let decoded = decode(bytes, None)?;
         let mut png = Cursor::new(Vec::new());
         decoded
             .write_to(&mut png, image::ImageFormat::Png)
@@ -79,18 +87,22 @@ impl ImageAsset {
         if png.len() > 9 * 1024 * 1024 {
             return Err("The decoded image is too large to store in a board.".into());
         }
+        Ok(Self::new(STANDARD.encode(png), decoded))
+    }
+    /// The image from base64 `png` data and its decoded pixels.
+    fn new(png: String, decoded: DynamicImage) -> Self {
         let (width, height) = (decoded.width(), decoded.height());
         let mut rgba = decoded.into_rgba8();
         // GPUI's sprite atlas expects BGRA pixels.
         for pixel in rgba.pixels_mut() {
             pixel.0.swap(0, 2);
         }
-        Ok(Self {
-            png: STANDARD.encode(png),
+        Self {
+            png,
             width,
             height,
             rendered: Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])),
-        })
+        }
     }
     pub fn bytes(&self) -> Vec<u8> {
         STANDARD.decode(&self.png).expect("Validated PNG")

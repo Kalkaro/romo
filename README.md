@@ -56,13 +56,13 @@ packages; the Linux build is the primary tested target.
 - Paste images from the system clipboard with Ctrl+V, or use the image tool. Copy images to other apps. Images stay embedded in saved boards and SVG exports. Corner resizing preserves aspect ratio; Shift allows free resizing.
 - Undo, redo, duplicate, copy, paste, and delete. Pasted objects and images land centered under the pointer; pasting again without moving it cascades the copies. With the pointer off the board, copies go beside the originals.
 - Press **Y** to toggle declutter mode: the controls fade out or back in over 200 ms, with the board position preserved. Press Y again during a transition to reverse the fade. Selection outlines, resizing, drawing, snapping, keyboard tools, and the right-click object toolbar still work. While editing text, Y types the letter.
-- Large boards stay smooth when zoomed out: text too small to read is drawn as soft lines, text is shaped once and scaled, and pen strokes are tessellated once and reused.
+- Large boards stay smooth when zoomed out: text too small to read is drawn as soft lines, text is shaped once and scaled, pen strokes are tessellated once and reused, and strokes of one color drawn in a row are painted together. Copies of a board, such as undo steps, share their pen strokes instead of duplicating them.
 - Align objects and groups to other objects with snapping guides. Pen strokes that touch or overlap count as one drawing, and objects align to the drawing as a whole; lone strokes and connectors are not snap targets. Snapping is on by default; turn it off in Settings or hold Alt during a drag to bypass it. Toggle the grid and navigate with the minimap.
 - Save and open `.romo` files; export the full board to SVG.
 
 The top bar floats in the top-left corner: **Save**, the **File** menu, the board name, then undo and redo. Click the board name to choose a saved board, create a new one, import a board, or rename it. **Save** writes directly to the library; **File → Export board** writes a portable `.romo` copy.
 
-Romo stores boards in `~/.local/share/romo/boards/` on Linux, with `session.json` and `settings.json` alongside that folder. Changes are saved about once a second in the background, and on exit, using atomic file replacement. Switching boards first saves your current work. Restarting restores the last board and viewport. Existing sessions and imported files are copied into the library; original files and unreadable recovery files are preserved. Set `ROMO_DATA_DIR` to choose another folder. Native file dialogs use your desktop portal, with the packaged Zenity fallback on Linux.
+Romo stores boards in `~/.local/share/romo/boards/` on Linux, with `session.json` and `settings.json` alongside that folder. Boards are compressed, so a drawing-heavy board takes about a tenth of the space it once did; `session.json` only records which board was open. Changes are saved about once a second in the background, and on exit, using atomic file replacement. Switching boards first saves your current work. Restarting restores the last board and viewport. Existing sessions and imported files are copied into the library; original files and unreadable recovery files are preserved. Set `ROMO_DATA_DIR` to choose another folder. Native file dialogs use your desktop portal, with the packaged Zenity fallback on Linux.
 
 | Action | Shortcut |
 | --- | --- |
@@ -130,7 +130,14 @@ zooming and panning, then prints frames per second and board paint times:
 cargo run --release -- --bench
 ```
 
-The app has no accounts, networking, or collaboration features. Board files use a versioned JSON format. SVG export preserves objects and editable text, with approximate font wrapping.
+To measure one of your own boards instead, pass its file. The benchmark only
+reads it:
+
+```sh
+cargo run --release -- --bench ~/.local/share/romo/boards/board-….romo
+```
+
+The app has no accounts, networking, or collaboration features. Board files are gzip-compressed, versioned JSON (`zcat board.romo` shows it), with each pen stroke's points as one flat list of coordinates. Romo still opens version 1 boards, plain JSON with an object per point, and saves them in the new format. SVG export preserves objects and editable text, with approximate font wrapping.
 
 ## License
 

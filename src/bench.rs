@@ -73,7 +73,7 @@ pub fn board() -> Board {
         let to = notes[(index * 7 + 25) % notes.len()];
         let id = board.add(Kind::Arrow, Pos2::ZERO, PALETTE[5]);
         let arrow = board.get_mut(id).unwrap();
-        arrow.points = vec![Pos2::ZERO, pos2(200.0, 0.0)];
+        arrow.points = vec![Pos2::ZERO, pos2(200.0, 0.0)].into();
         arrow.start_anchor = Some(from);
         arrow.end_anchor = Some(to);
     }
@@ -145,6 +145,8 @@ pub fn report(samples: &[(&'static str, f32, f32)]) {
     }
 }
 
-pub fn run(handle: WindowHandle<Romo>, cx: &mut App) {
-    let _ = handle.update(cx, |app, window, cx| app.start_bench(board(), window, cx));
+/// Benchmark the generated board, or the board file Romo opened.
+pub fn run(handle: WindowHandle<Romo>, opened: bool, cx: &mut App) {
+    let board = (!opened).then(board);
+    let _ = handle.update(cx, |app, window, cx| app.start_bench(board, window, cx));
 }

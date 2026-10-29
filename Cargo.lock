@@ -4528,6 +4528,7 @@ dependencies = [
  "arboard",
  "base64",
  "directories",
+ "flate2",
  "gpui",
  "image",
  "lyon",

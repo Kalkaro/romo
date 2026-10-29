@@ -1,4 +1,5 @@
 use crate::model::{Board, View};
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -6,6 +7,15 @@ use std::{
     path::{Path, PathBuf},
     sync::{Mutex, PoisonError},
 };
+
+/// Boards are saved as compressed JSON, with each pen stroke's points as one
+/// flat list of coordinates. Version 1 boards, plain JSON with an object per
+/// point, still open.
+const VERSION: u32 = 2;
+/// The largest board file Romo reads or writes.
+const FILE_LIMIT: usize = 32 * 1024 * 1024;
+/// The largest board unpacked, so a small file can't unpack without end.
+const CONTENT_LIMIT: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Document {
@@ -19,15 +29,15 @@ impl Document {
     pub fn new(board: Board, view: View) -> Self {
         Self {
             format: "romo".into(),
-            version: 1,
+            version: VERSION,
             board,
             view,
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.format != "romo" || self.version != 1 {
-            return Err("This is not a supported Romo board (expected version 1).".into());
+        if self.format != "romo" || !(1..=VERSION).contains(&self.version) {
+            return Err("This is not a supported Romo board (expected version 1 or 2).".into());
         }
         self.board.validate()?;
         if !self.view.pan.is_finite()
@@ -44,7 +54,9 @@ impl Document {
 
 #[derive(Serialize, Deserialize)]
 pub struct Session {
-    pub document: Document,
+    /// The board itself, kept here only when there is no library to save it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<Document>,
     pub path: Option<PathBuf>,
     pub dirty: bool,
 }
@@ -73,16 +85,21 @@ impl Snapshot {
             return Ok(());
         }
         *latest = self.number;
-        if let Some(path) = &self.board {
-            save(path, &self.document)?;
-        }
+        // A board saved in the library is only named by the session.
+        let document = match &self.board {
+            Some(path) => {
+                save(path, &self.document)?;
+                None
+            }
+            None => Some(self.document),
+        };
         let path = self.session.ok_or_else(|| {
             "Cannot find a local data folder. Save your board to a file.".to_owned()
         })?;
         save_session(
             &path,
             &Session {
-                document: self.document,
+                document,
                 path: self.path,
                 dirty: self.dirty,
             },
@@ -141,7 +158,7 @@ pub fn library(folder: &Path) -> Vec<BoardEntry> {
         .filter_map(|entry| {
             let summary: Summary =
                 serde_json::from_slice(&read_limited(&entry.path()).ok()?).ok()?;
-            if summary.format != "romo" || summary.version != 1 {
+            if summary.format != "romo" || !(1..=VERSION).contains(&summary.version) {
                 return None;
             }
             Some(BoardEntry {
@@ -182,40 +199,75 @@ pub fn load(path: &Path) -> Result<Document, String> {
     Ok(document)
 }
 
-pub fn load_session(path: &Path) -> Result<Session, String> {
-    let session: Session = serde_json::from_slice(&read_limited(path)?)
+/// The previous session and its board, read from the library unless the
+/// session holds it.
+pub fn load_session(path: &Path) -> Result<(Session, Document), String> {
+    let mut session: Session = serde_json::from_slice(&read_limited(path)?)
         .map_err(|e| format!("Cannot restore the previous session: {e}"))?;
-    session.document.validate()?;
-    Ok(session)
+    let document = match session.document.take() {
+        Some(document) => {
+            document.validate()?;
+            document
+        }
+        None => load(
+            session
+                .path
+                .as_deref()
+                .ok_or("The previous session names no board.")?,
+        )?,
+    };
+    Ok((session, document))
 }
 
+/// The JSON in a file, unpacked when it is compressed.
 fn read_limited(path: &Path) -> Result<Vec<u8>, String> {
-    const LIMIT: u64 = 32 * 1024 * 1024;
     let file = fs::File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
     let mut bytes = Vec::new();
-    file.take(LIMIT + 1)
+    file.take(FILE_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("Cannot read board: {e}"))?;
-    if bytes.len() as u64 > LIMIT {
+    if bytes.len() > FILE_LIMIT {
         return Err("The board file is larger than 32 MB.".into());
     }
-    Ok(bytes)
+    // Gzip's signature; JSON never starts with it.
+    if !bytes.starts_with(&[0x1f, 0x8b]) {
+        return Ok(bytes);
+    }
+    let mut json = Vec::new();
+    GzDecoder::new(bytes.as_slice())
+        .take(CONTENT_LIMIT as u64 + 1)
+        .read_to_end(&mut json)
+        .map_err(|e| format!("Cannot unpack this board: {e}"))?;
+    if json.len() > CONTENT_LIMIT {
+        return Err("The board is larger than 256 MB unpacked.".into());
+    }
+    Ok(json)
 }
 
 pub fn save(path: &Path, document: &Document) -> Result<(), String> {
     document.validate()?;
-    let bytes = serde_json::to_vec_pretty(document).map_err(|e| e.to_string())?;
+    let json = serde_json::to_vec(document).map_err(|e| e.to_string())?;
+    if json.len() > CONTENT_LIMIT {
+        return Err("Board exceeds the 256 MB storage limit.".into());
+    }
+    let mut packed = GzEncoder::new(Vec::with_capacity(json.len() / 3), Compression::default());
+    let bytes = packed
+        .write_all(&json)
+        .and_then(|()| packed.finish())
+        .map_err(|e| e.to_string())?;
     atomic_write(path, &bytes)
 }
 
 pub fn save_session(path: &Path, session: &Session) -> Result<(), String> {
-    session.document.validate()?;
+    if let Some(document) = &session.document {
+        document.validate()?;
+    }
     let bytes = serde_json::to_vec(session).map_err(|e| e.to_string())?;
     atomic_write(path, &bytes)
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if bytes.len() > 32 * 1024 * 1024 {
+    if bytes.len() > FILE_LIMIT {
         return Err("Board exceeds the 32 MB storage limit.".into());
     }
     let parent = path
@@ -284,8 +336,58 @@ mod tests {
         snapshot(2, "Newer").write(&latest).unwrap();
         snapshot(1, "Older").write(&latest).unwrap();
         assert_eq!(load(&board_path).unwrap().board.title, "Newer");
-        let session = load_session(&session_path).unwrap();
-        assert_eq!(session.document.board.title, "Newer");
+        let (session, restored) = load_session(&session_path).unwrap();
+        assert_eq!(restored.board.title, "Newer");
+        // The session names the library's board instead of keeping a copy.
+        assert!(session.document.is_none());
+        assert!(fs::metadata(&session_path).unwrap().len() < 1024);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn boards_save_compressed_and_version_1_files_still_open() {
+        let folder = std::env::temp_dir().join(format!("romo-format-{}", std::process::id()));
+        let path = folder.join("board.romo");
+        let mut board = Board::welcome();
+        let id = board.add(
+            crate::model::Kind::Pen,
+            crate::geometry::pos2(5.0, 5.0),
+            crate::model::PALETTE[7],
+        );
+        board.get_mut(id).unwrap().points = (0..500)
+            .map(|i| crate::geometry::pos2(i as f32 * 0.37, (i as f32 * 0.11).sin() * 9.0))
+            .collect();
+        let document = Document::new(board, View::default());
+        save(&path, &document).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert!(
+            bytes.starts_with(&[0x1f, 0x8b]),
+            "boards are saved compressed"
+        );
+        let reopened = load(&path).unwrap();
+        assert_eq!(reopened.board, document.board);
+        assert_eq!(reopened.version, 2);
+        // Version 1: indented JSON, with an object for every point.
+        let mut old = serde_json::to_value(&document).unwrap();
+        old["version"] = 1.into();
+        for item in old["board"]["items"].as_array_mut().unwrap() {
+            let flat: Vec<f64> = serde_json::from_value(item["points"].clone()).unwrap();
+            item["points"] = flat
+                .chunks(2)
+                .map(|pair| serde_json::json!({ "x": pair[0], "y": pair[1] }))
+                .collect();
+        }
+        let legacy = folder.join("legacy.romo");
+        atomic_write(&legacy, &serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+        assert_eq!(load(&legacy).unwrap().board, document.board);
+        // A session from before keeps its own copy of the board.
+        let session = folder.join("session.json");
+        let old_session = serde_json::json!({ "document": old, "path": legacy, "dirty": false });
+        atomic_write(&session, &serde_json::to_vec(&old_session).unwrap()).unwrap();
+        assert_eq!(load_session(&session).unwrap().1.board, document.board);
+        // Damaged files are refused.
+        atomic_write(&path, &bytes[..bytes.len() / 2]).unwrap();
+        assert!(load(&path).is_err());
         fs::remove_dir_all(folder).unwrap();
     }
 

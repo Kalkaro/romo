@@ -15,7 +15,7 @@ use gpui::{
 };
 use std::{
     cell::RefCell,
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -287,9 +287,17 @@ pub struct Romo {
 }
 
 impl Romo {
-    /// Replace the board and animate the view each frame, then report timings and quit.
-    pub fn start_bench(&mut self, board: Board, window: &mut Window, cx: &mut Context<Self>) {
-        self.board = board;
+    /// Animate the view each frame over `board`, or the board already open,
+    /// then report timings and quit.
+    pub fn start_bench(
+        &mut self,
+        board: Option<Board>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(board) = board {
+            self.board = board;
+        }
         self.selected.clear();
         self.bench = Some(Bench::default());
         window.refresh();
@@ -313,7 +321,15 @@ impl Romo {
             ));
         }
         bench.frame += 1;
-        self.view = view;
+        // The views circle the middle of the board.
+        let middle = self
+            .board
+            .bounds()
+            .map_or(Pos2::ZERO, |bounds| bounds.center());
+        self.view = View {
+            pan: view.pan - middle.to_vec2() * view.zoom,
+            zoom: view.zoom,
+        };
         window.request_animation_frame();
     }
     fn chrome_opacity(&self, now: Instant) -> f32 {
@@ -728,7 +744,7 @@ impl Romo {
             (Pos2::ZERO, pos2(100.0, 50.0)),
         ] {
             let id = self.board.add(Kind::Pen, from, PALETTE[7]);
-            self.board.get_mut(id).unwrap().points = vec![Pos2::ZERO, (to - from).to_pos2()];
+            self.board.get_mut(id).unwrap().points = vec![Pos2::ZERO, (to - from).to_pos2()].into();
         }
         self.selected = self.board.items.iter().map(|i| i.id).collect();
         self.tool = Tool::Select;
@@ -770,7 +786,7 @@ impl Romo {
         self.view = View::default();
         let stroke = |board: &mut Board, from: Pos2, to: Pos2| {
             let id = board.add(Kind::Pen, from, PALETTE[7]);
-            board.get_mut(id).unwrap().points = vec![Pos2::ZERO, (to - from).to_pos2()];
+            board.get_mut(id).unwrap().points = vec![Pos2::ZERO, (to - from).to_pos2()].into();
         };
         let note = self.board.add(Kind::Note, pos2(-300.0, -300.0), PALETTE[0]);
         stroke(&mut self.board, pos2(0.0, -150.0), pos2(80.0, -150.0));
@@ -880,11 +896,15 @@ impl Romo {
                 == "Content survives switching",
             "Switch did not save outgoing content"
         );
-        let session = storage::load_session(self.session_path.as_ref().unwrap())
+        let (session, restored) = storage::load_session(self.session_path.as_ref().unwrap())
             .map_err(anyhow::Error::msg)?;
         anyhow::ensure!(
-            session.path == Some(first_path),
+            session.path == Some(first_path) && restored.board == first,
             "Restart would restore the wrong board"
+        );
+        anyhow::ensure!(
+            session.document.is_none(),
+            "The session kept a second copy of a board saved in the library"
         );
         let external = folder.join("external.romo");
         storage::save(&external, &Document::new(Board::default(), View::default()))
@@ -1042,9 +1062,9 @@ impl Romo {
             && path.exists()
         {
             match storage::load_session(&path) {
-                Ok(session) => {
-                    app.board = session.document.board;
-                    app.view = session.document.view;
+                Ok((session, document)) => {
+                    app.board = document.board;
+                    app.view = document.view;
                     app.path = session.path;
                     app.dirty = session.dirty;
                     app.fit_pending = false;
@@ -1065,7 +1085,7 @@ impl Romo {
                 {
                     app.path = Some(storage::board_path(folder));
                 }
-                app.persist();
+                app.autosave(cx);
                 app.refresh_library();
             }
         }
@@ -1319,7 +1339,7 @@ impl Romo {
             let id = self.board.add(kind, world, color);
             let item = self.board.get_mut(id).unwrap();
             if matches!(kind, Kind::Pen | Kind::Arrow) {
-                item.points = vec![Pos2::ZERO, Pos2::ZERO];
+                item.points = vec![Pos2::ZERO, Pos2::ZERO].into();
                 item.start_anchor = anchor;
             } else if kind == Kind::Text {
                 // Clicked text grows with what is typed; dragging out a box fixes its width.
@@ -1397,25 +1417,24 @@ impl Romo {
                     }
                 }
                 if delta.length() * self.view.zoom > 2.0 {
-                    for original in originals {
-                        let ends = if original.kind == Kind::Arrow {
-                            Some(before.arrow_ends(original))
-                        } else {
-                            None
+                    // One pass over the board, however many objects move.
+                    let originals: HashMap<u64, &Item> =
+                        originals.iter().map(|i| (i.id, i)).collect();
+                    for item in &mut self.board.items {
+                        let Some(original) = originals.get(&item.id) else {
+                            continue;
                         };
-                        if let Some(item) = self.board.get_mut(original.id) {
-                            item.pos = original.pos + delta;
-                            if let Some((a, b)) = ends {
-                                item.points = vec![
-                                    (a - original.pos).to_pos2(),
-                                    (b - original.pos).to_pos2(),
-                                ];
-                                if !item.start_anchor.is_some_and(|id| moving.contains(&id)) {
-                                    item.start_anchor = None;
-                                }
-                                if !item.end_anchor.is_some_and(|id| moving.contains(&id)) {
-                                    item.end_anchor = None;
-                                }
+                        item.pos = original.pos + delta;
+                        if original.kind == Kind::Arrow {
+                            let (a, b) = before.arrow_ends(original);
+                            item.points =
+                                vec![(a - original.pos).to_pos2(), (b - original.pos).to_pos2()]
+                                    .into();
+                            if !item.start_anchor.is_some_and(|id| moving.contains(&id)) {
+                                item.start_anchor = None;
+                            }
+                            if !item.end_anchor.is_some_and(|id| moving.contains(&id)) {
+                                item.end_anchor = None;
                             }
                         }
                     }
@@ -1516,7 +1535,7 @@ impl Romo {
                             }
                         }
                         Kind::Arrow => {
-                            item.points = vec![Pos2::ZERO, (world - *start).to_pos2()];
+                            item.points = vec![Pos2::ZERO, (world - *start).to_pos2()].into();
                             item.end_anchor = anchor.filter(|id| Some(*id) != item.start_anchor);
                         }
                         _ if world.distance(*start) * self.view.zoom > 8.0 => {
@@ -2077,7 +2096,7 @@ impl Romo {
                 let mut i = i.clone();
                 if i.kind == Kind::Arrow {
                     let (a, b) = self.board.arrow_ends(&i);
-                    i.points = vec![(a - i.pos).to_pos2(), (b - i.pos).to_pos2()];
+                    i.points = vec![(a - i.pos).to_pos2(), (b - i.pos).to_pos2()].into();
                     i.start_anchor = i.start_anchor.filter(|id| self.selected.contains(id));
                     i.end_anchor = i.end_anchor.filter(|id| self.selected.contains(id));
                 }

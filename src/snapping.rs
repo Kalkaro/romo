@@ -292,7 +292,7 @@ mod tests {
         let mut board = Board::default();
         let mut stroke = |from: Pos2, to: Pos2| {
             let id = board.add(Kind::Pen, from, PALETTE[7]);
-            board.get_mut(id).unwrap().points = vec![Pos2::ZERO, (to - from).to_pos2()];
+            board.get_mut(id).unwrap().points = vec![Pos2::ZERO, (to - from).to_pos2()].into();
             id
         };
         let first = stroke(pos2(0.0, 0.0), pos2(100.0, 40.0));
@@ -300,7 +300,7 @@ mod tests {
         stroke(pos2(600.0, 600.0), pos2(640.0, 620.0));
         let note = board.add(Kind::Note, pos2(300.0, 0.0), PALETTE[0]);
         let arrow = board.add(Kind::Arrow, pos2(0.0, 300.0), PALETTE[7]);
-        board.get_mut(arrow).unwrap().points = vec![Pos2::ZERO, pos2(200.0, 0.0)];
+        board.get_mut(arrow).unwrap().points = vec![Pos2::ZERO, pos2(200.0, 0.0)].into();
         let note = board.get(note).unwrap().rect();
         let found = targets(&board, |_| false);
         assert_eq!(found.len(), 2);

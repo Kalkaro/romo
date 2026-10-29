@@ -17,6 +17,8 @@ unicode-segmentation = "1"
 lyon = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 base64 = "0.22"
+# Compresses saved boards; already built for PNG decoding.
+flate2 = "1"
 arboard = { version = "=3.6.1", features = ["wayland-data-control"] }
 
 # Graphics tablets on Wayland, read on GPUI's own connection. These match GPUI's versions.

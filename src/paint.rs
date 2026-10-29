@@ -1,7 +1,7 @@
 use crate::{
     geometry::{Corner, Pos2, Rect, pos2, vec2},
     images::ImageAsset,
-    model::{Board, Item, Kind, View, connector_ends},
+    model::{Board, Item, Kind, PointsId, View, connector_ends},
 };
 use gpui::{
     App, AssetSource, Bounds, ContentMask, PathBuilder, Pixels, SharedString, TextRun,
@@ -379,7 +379,9 @@ pub struct Cache {
     exact_glyphs: bool,
 }
 struct CachedStroke {
-    shape: u64,
+    /// The points and line width the triangles were made from.
+    points: PointsId,
+    width: f32,
     level: i32,
     triangles: Vec<[Pos2; 3]>,
 }
@@ -404,18 +406,21 @@ impl Cache {
     /// budget and briefly keep their previous detail.
     fn triangles(&mut self, item: &Item, zoom: f32) -> &[[Pos2; 3]] {
         let level = zoom.log2().floor() as i32;
-        let shape = shape_key(item);
+        let width = item.line_width();
         let current = self.strokes.get(&item.id).is_some_and(|cached| {
-            cached.shape == shape && (cached.level == level || self.stroke_time >= STROKE_BUDGET)
+            cached.points.is(&item.points)
+                && cached.width == width
+                && (cached.level == level || self.stroke_time >= STROKE_BUDGET)
         });
         if !current {
             let started = Instant::now();
-            let triangles = tessellate(&item.points, item.line_width(), level);
+            let triangles = tessellate(&item.points, width, level);
             self.stroke_time += started.elapsed();
             self.strokes.insert(
                 item.id,
                 CachedStroke {
-                    shape,
+                    points: item.points.id(),
+                    width,
                     level,
                     triangles,
                 },
@@ -423,20 +428,6 @@ impl Cache {
         }
         &self.strokes[&item.id].triangles
     }
-}
-
-/// Fingerprint of a stroke's geometry, so edits rebuild its triangles.
-fn shape_key(item: &Item) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for value in item
-        .points
-        .iter()
-        .flat_map(|point| [point.x, point.y])
-        .chain([item.line_width()])
-    {
-        hash = (hash ^ u64::from(value.to_bits())).wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
 }
 
 /// Tessellate a smoothed stroke at the detail of zoom level `2^level`.
@@ -471,10 +462,17 @@ fn tessellate(points: &[Pos2], width: f32, level: i32) -> Vec<[Pos2; 3]> {
         builder.quadratic_bezier_to(to(curve.control), to(curve.end));
     }
     builder.end(false);
+    // Below about two pixels on screen, round caps and joins look no different
+    // from square ones and bevels, and take many more triangles.
+    let (cap, join) = if width * scale < 1.0 {
+        (LineCap::Square, LineJoin::Bevel)
+    } else {
+        (LineCap::Round, LineJoin::Round)
+    };
     let options = StrokeOptions::default()
         .with_line_width(width)
-        .with_line_cap(LineCap::Round)
-        .with_line_join(LineJoin::Round)
+        .with_line_cap(cap)
+        .with_line_join(join)
         .with_tolerance(0.1 / scale);
     let mut buffers: VertexBuffers<lyon::math::Point, u32> = VertexBuffers::new();
     let mut output = BuffersBuilder::new(&mut buffers, |vertex: StrokeVertex| vertex.position());
@@ -524,6 +522,18 @@ struct Painter<'a> {
     canvas: Rect,
     ends: &'a dyn Fn(&Item) -> (Pos2, Pos2),
     cache: &'a mut Cache,
+    /// Pen strokes of one color painted in a row, gathered into one path:
+    /// GPUI handles each path separately, which costs more than its triangles.
+    strokes: Option<(gpui::Path<Pixels>, u32)>,
+}
+
+impl Painter<'_> {
+    /// Paint the gathered strokes, before anything that may cover them.
+    fn flush(&mut self, window: &mut Window) {
+        if let Some((path, color)) = self.strokes.take() {
+            window.paint_path(path, rgb(color));
+        }
+    }
 }
 
 pub fn board(
@@ -586,6 +596,7 @@ pub fn board(
                 canvas,
                 ends: &ends,
                 cache,
+                strokes: None,
             };
             for &(item, screen) in layers.iter().flatten() {
                 paint_item(
@@ -597,6 +608,7 @@ pub fn board(
                     creating == Some(item.id),
                 );
             }
+            painter.flush(window);
             painter.cache.strokes.retain(|id, _| index.contains_key(id));
             // While cropping, the rest of the picture shows dimmed around the crop.
             if let Some(item) = cropping.and_then(|id| index.get(&id))
@@ -711,6 +723,9 @@ fn paint_item(
 ) {
     let view = painter.view;
     let color = item.color.rgb();
+    if item.kind != Kind::Pen {
+        painter.flush(window);
+    }
     match item.kind {
         Kind::Image => {
             if let Some(asset) = &item.image {
@@ -871,25 +886,34 @@ fn shape(window: &mut Window, kind: Kind, r: Rect, color: u32) {
 /// detail are round dots.
 fn stroke(window: &mut Window, painter: &mut Painter<'_>, item: &Item, r: Rect) {
     let view = painter.view;
-    let color = rgb(item.color.rgb());
+    let color = item.color.rgb();
     if r.width().max(r.height()) < 1.5 {
+        painter.flush(window);
         let size = (item.line_width() * view.zoom).max(1.0);
         let dot = Rect::from_center_size(r.center(), vec2(size, size));
-        window.paint_quad(fill(bounds(dot), color).corner_radii(px(size * 0.5)));
+        window.paint_quad(fill(bounds(dot), rgb(color)).corner_radii(px(size * 0.5)));
         return;
     }
     let origin = painter.canvas.center() + view.pan + item.pos.to_vec2() * view.zoom;
     let at = |local: Pos2| p(origin + local.to_vec2() * view.zoom);
+    if painter
+        .strokes
+        .as_ref()
+        .is_some_and(|(_, other)| *other != color)
+    {
+        painter.flush(window);
+    }
     let triangles = painter.cache.triangles(item, view.zoom);
     let Some(first) = triangles.first() else {
         return;
     };
     let solid = (point(0.0, 1.0), point(0.0, 1.0), point(0.0, 1.0));
-    let mut path = gpui::Path::new(at(first[0]));
+    let (path, _) = painter
+        .strokes
+        .get_or_insert_with(|| (gpui::Path::new(at(first[0])), color));
     for [a, b, c] in triangles {
         path.push_triangle((at(*a), at(*b), at(*c)), solid);
     }
-    window.paint_path(path, color);
 }
 
 #[derive(Clone, Copy)]

@@ -1,6 +1,14 @@
 use crate::geometry::{Color32, Pos2, Rect, Vec2, pos2, vec2};
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, MapAccess, SeqAccess, Visitor, value::MapAccessDeserializer},
+};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    ops::Deref,
+    sync::{Arc, Weak},
+};
 
 pub const PALETTE: [Color32; 8] = [
     Color32::from_rgb(24, 24, 27),
@@ -52,7 +60,7 @@ pub struct Item {
     pub text: String,
     pub font_size: f32,
     pub stroke_width: f32,
-    pub points: Vec<Pos2>,
+    pub points: Points,
     pub start_anchor: Option<u64>,
     pub end_anchor: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,6 +84,175 @@ fn is_false(value: &bool) -> bool {
 /// Valid cumulative scales for pen strokes.
 const SCALES: std::ops::RangeInclusive<f32> = 1e-4..=1e4;
 
+/// The points of a pen stroke or connector, relative to its position. Copies
+/// of a board, such as undo steps, share them, and their bounds are kept with
+/// them, so neither copying nor measuring a stroke walks all its points.
+#[derive(Clone, Default)]
+pub struct Points(Arc<PointList>);
+
+#[derive(Clone)]
+struct PointList {
+    points: Vec<Pos2>,
+    bounds: Rect,
+}
+
+impl Default for PointList {
+    fn default() -> Self {
+        Self {
+            points: Vec::new(),
+            bounds: Rect::NOTHING,
+        }
+    }
+}
+
+impl Points {
+    /// The smallest rectangle around every point.
+    pub fn bounds(&self) -> Rect {
+        self.0.bounds
+    }
+
+    pub fn push(&mut self, point: Pos2) {
+        let list = Arc::make_mut(&mut self.0);
+        list.points.push(point);
+        list.bounds.extend_with(point);
+    }
+
+    /// Change the points in place.
+    pub fn edit(&mut self, change: impl FnOnce(&mut Vec<Pos2>)) {
+        let list = Arc::make_mut(&mut self.0);
+        change(&mut list.points);
+        list.bounds = bounds(&list.points);
+    }
+
+    /// Each point moved by `place`.
+    pub fn map(&self, place: impl Fn(Pos2) -> Pos2) -> Self {
+        self.iter().map(|&point| place(point)).collect()
+    }
+
+    /// Something that recognizes these very points later, without keeping them.
+    pub fn id(&self) -> PointsId {
+        PointsId(Arc::downgrade(&self.0))
+    }
+}
+
+fn bounds(points: &[Pos2]) -> Rect {
+    let mut bounds = Rect::NOTHING;
+    for &point in points {
+        bounds.extend_with(point);
+    }
+    bounds
+}
+
+/// Recognizes one list of points. While it lives, no other list can take
+/// that list's place in memory, and changing the points moves them.
+pub struct PointsId(Weak<PointList>);
+
+impl PointsId {
+    pub fn is(&self, points: &Points) -> bool {
+        std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(&points.0))
+    }
+}
+
+impl Deref for Points {
+    type Target = [Pos2];
+
+    fn deref(&self) -> &[Pos2] {
+        &self.0.points
+    }
+}
+
+impl From<Vec<Pos2>> for Points {
+    fn from(points: Vec<Pos2>) -> Self {
+        let bounds = bounds(&points);
+        Self(Arc::new(PointList { points, bounds }))
+    }
+}
+
+impl FromIterator<Pos2> for Points {
+    fn from_iter<I: IntoIterator<Item = Pos2>>(points: I) -> Self {
+        points.into_iter().collect::<Vec<_>>().into()
+    }
+}
+
+impl PartialEq for Points {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0.points == other.0.points
+    }
+}
+
+impl fmt::Debug for Points {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.points.fmt(f)
+    }
+}
+
+/// Saved as one flat list of coordinates, `[x, y, x, y, …]`.
+impl Serialize for Points {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter().flat_map(|point| [point.x, point.y]))
+    }
+}
+
+/// Reads flat coordinates, or the `{"x", "y"}` objects of version 1 boards.
+impl<'de> Deserialize<'de> for Points {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        enum Entry {
+            Coordinate(f32),
+            Point(Pos2),
+        }
+        struct EntryVisitor;
+        impl<'de> Visitor<'de> for EntryVisitor {
+            type Value = Entry;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a coordinate or a point")
+            }
+            fn visit_f64<E: de::Error>(self, value: f64) -> Result<Entry, E> {
+                Ok(Entry::Coordinate(value as f32))
+            }
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<Entry, E> {
+                Ok(Entry::Coordinate(value as f32))
+            }
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<Entry, E> {
+                Ok(Entry::Coordinate(value as f32))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Entry, A::Error> {
+                Pos2::deserialize(MapAccessDeserializer::new(map)).map(Entry::Point)
+            }
+        }
+        impl<'de> Deserialize<'de> for Entry {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                deserializer.deserialize_any(EntryVisitor)
+            }
+        }
+        struct PointsVisitor;
+        impl<'de> Visitor<'de> for PointsVisitor {
+            type Value = Points;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a list of coordinates")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut entries: A) -> Result<Points, A::Error> {
+                let mut points = Vec::new();
+                let mut x = None;
+                while let Some(entry) = entries.next_element()? {
+                    match (entry, x.take()) {
+                        (Entry::Coordinate(y), Some(x)) => points.push(pos2(x, y)),
+                        (Entry::Coordinate(coordinate), None) => x = Some(coordinate),
+                        (Entry::Point(point), None) => points.push(point),
+                        (Entry::Point(_), Some(_)) => {
+                            return Err(de::Error::custom("a point splits a pair of coordinates"));
+                        }
+                    }
+                }
+                if x.is_some() {
+                    return Err(de::Error::custom("a coordinate has no partner"));
+                }
+                Ok(points.into())
+            }
+        }
+        deserializer.deserialize_seq(PointsVisitor)
+    }
+}
+
 impl Item {
     pub fn new(id: u64, kind: Kind, pos: Pos2, color: Color32) -> Self {
         let size = match kind {
@@ -97,7 +274,7 @@ impl Item {
             },
             font_size: if kind == Kind::Text { 32.0 } else { 20.0 },
             stroke_width: 3.0,
-            points: Vec::new(),
+            points: Points::default(),
             start_anchor: None,
             end_anchor: None,
             image: None,
@@ -117,9 +294,9 @@ impl Item {
     pub fn scaled(&self, anchor: Pos2, factor: Vec2) -> Self {
         let mut item = self.clone();
         item.pos = anchor + (self.pos - anchor) * factor;
-        for point in &mut item.points {
-            *point = (point.to_vec2() * factor).to_pos2();
-        }
+        item.points = self
+            .points
+            .map(|point| (point.to_vec2() * factor).to_pos2());
         let scale = self.scale.unwrap_or(1.0) * (factor.x * factor.y).sqrt();
         item.scale = Some(scale.clamp(*SCALES.start(), *SCALES.end()));
         item
@@ -127,11 +304,11 @@ impl Item {
 
     pub fn rect(&self) -> Rect {
         if matches!(self.kind, Kind::Pen | Kind::Arrow) && !self.points.is_empty() {
-            let mut rect = Rect::NOTHING;
-            for point in &self.points {
-                rect.extend_with(self.pos + point.to_vec2());
-            }
-            rect
+            let bounds = self.points.bounds();
+            Rect::from_min_max(
+                self.pos + bounds.min.to_vec2(),
+                self.pos + bounds.max.to_vec2(),
+            )
         } else {
             Rect::from_min_size(self.pos, self.size)
         }
@@ -186,12 +363,12 @@ impl Item {
         if self.kind == Kind::Pen {
             let old = self.rect().size().max(vec2(1.0, 1.0));
             let origin = self.rect().min - self.pos;
-            for point in &mut self.points {
-                *point = pos2(
+            self.points = self.points.map(|point| {
+                pos2(
                     origin.x + (point.x - origin.x) * size.x / old.x,
                     origin.y + (point.y - origin.y) * size.y / old.y,
-                );
-            }
+                )
+            });
         }
         self.size = size;
     }
@@ -324,17 +501,22 @@ impl Board {
             .collect();
         for (id, (a, b)) in detached {
             if let Some(item) = self.get_mut(id) {
+                let pos = item.pos;
                 if item.start_anchor.is_some_and(|id| ids.contains(&id)) {
                     item.start_anchor = None;
-                    if !item.points.is_empty() {
-                        item.points[0] = (a - item.pos).to_pos2();
-                    }
+                    item.points.edit(|points| {
+                        if let Some(point) = points.first_mut() {
+                            *point = (a - pos).to_pos2();
+                        }
+                    });
                 }
                 if item.end_anchor.is_some_and(|id| ids.contains(&id)) {
                     item.end_anchor = None;
-                    if let Some(point) = item.points.last_mut() {
-                        *point = (b - item.pos).to_pos2();
-                    }
+                    item.points.edit(|points| {
+                        if let Some(point) = points.last_mut() {
+                            *point = (b - pos).to_pos2();
+                        }
+                    });
                 }
             }
         }
@@ -470,7 +652,7 @@ impl Board {
             Color32::from_rgb(113, 113, 122),
         );
         let item = board.get_mut(arrow).unwrap();
-        item.points = vec![Pos2::ZERO, pos2(150.0, 0.0)];
+        item.points = vec![Pos2::ZERO, pos2(150.0, 0.0)].into();
         item.start_anchor = Some(6);
         item.end_anchor = Some(next);
         let hint = board.add(Kind::Text, pos2(285.0, 148.0), PALETTE[5]);
@@ -632,6 +814,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn points_save_as_flat_coordinates_and_read_either_form() {
+        let points: Points = vec![pos2(1.5, -2.0), pos2(3.25, 4.0)].into();
+        assert_eq!(
+            serde_json::to_string(&points).unwrap(),
+            "[1.5,-2.0,3.25,4.0]"
+        );
+        assert_eq!(
+            serde_json::from_str::<Points>("[1.5,-2,3.25,4]").unwrap(),
+            points
+        );
+        let objects = r#"[{"x":1.5,"y":-2.0},{"x":3.25,"y":4.0}]"#;
+        assert_eq!(serde_json::from_str::<Points>(objects).unwrap(), points);
+        assert!(serde_json::from_str::<Points>("[1.0,2.0,3.0]").is_err());
+        assert!(serde_json::from_str::<Points>(r#"[1.0,{"x":1,"y":2},2.0]"#).is_err());
+        assert_eq!(
+            points.bounds(),
+            Rect::from_min_max(pos2(1.5, -2.0), pos2(3.25, 4.0))
+        );
+    }
+
+    #[test]
+    fn copies_share_points_and_changes_are_recognized() {
+        let points: Points = vec![Pos2::ZERO, pos2(10.0, 5.0)].into();
+        let mut copy = points.clone();
+        assert!(points.id().is(&copy));
+        copy.push(pos2(-10.0, 0.0));
+        assert!(!points.id().is(&copy) && points.len() == 2);
+        assert_eq!(copy.bounds().min, pos2(-10.0, 0.0));
+        // Even unshared points look new once changed.
+        let id = copy.id();
+        copy.push(pos2(0.0, 20.0));
+        assert!(!id.is(&copy));
+        copy.edit(|points| points[1] = pos2(50.0, 0.0));
+        assert_eq!(
+            copy.bounds(),
+            Rect::from_min_max(pos2(-10.0, 0.0), pos2(50.0, 20.0))
+        );
+    }
+
+    #[test]
     fn zoom_keeps_the_point_under_the_cursor() {
         let canvas = Rect::from_min_size(pos2(30.0, 60.0), vec2(1200.0, 800.0));
         let cursor = pos2(180.0, 250.0);
@@ -652,7 +874,7 @@ mod tests {
         let b = board.add(Kind::Rectangle, pos2(400.0, 0.0), PALETTE[0]);
         let arrow = board.add(Kind::Arrow, Pos2::ZERO, PALETTE[7]);
         let item = board.get_mut(arrow).unwrap();
-        item.points = vec![Pos2::ZERO, pos2(400.0, 0.0)];
+        item.points = vec![Pos2::ZERO, pos2(400.0, 0.0)].into();
         item.start_anchor = Some(a);
         item.end_anchor = Some(b);
         assert_eq!(
@@ -697,7 +919,7 @@ mod tests {
         let mut board = Board::default();
         let stroke = board.add(Kind::Pen, Pos2::ZERO, PALETTE[7]);
         board.get_mut(stroke).unwrap().points =
-            vec![Pos2::ZERO, pos2(100.0, 0.0), pos2(200.0, 0.0)];
+            vec![Pos2::ZERO, pos2(100.0, 0.0), pos2(200.0, 0.0)].into();
         board.add(Kind::Note, pos2(0.0, 40.0), PALETTE[0]);
         // A fast sweep crosses the stroke between pointer samples and over the note.
         assert_eq!(
@@ -718,7 +940,7 @@ mod tests {
     #[test]
     fn scaled_strokes_thin_when_shrunk_and_never_thicken() {
         let mut stroke = Item::new(1, Kind::Pen, pos2(10.0, 10.0), PALETTE[7]);
-        stroke.points = vec![Pos2::ZERO, pos2(100.0, 50.0)];
+        stroke.points = vec![Pos2::ZERO, pos2(100.0, 50.0)].into();
         let larger = stroke.scaled(Pos2::ZERO, vec2(2.0, 2.0));
         assert_eq!(
             larger.rect(),

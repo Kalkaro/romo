@@ -33,6 +33,7 @@ fn main() {
             path = Some(std::path::PathBuf::from(arg));
         }
     }
+    let opened = path.is_some();
     Application::new()
         .with_assets(paint::Assets)
         .run(move |cx: &mut App| {
@@ -70,7 +71,7 @@ fn main() {
             if smoke {
                 smoke::run(window, cx);
             } else if bench {
-                bench::run(window, cx);
+                bench::run(window, opened, cx);
             }
             cx.activate(true);
         });
