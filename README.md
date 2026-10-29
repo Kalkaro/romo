@@ -49,7 +49,7 @@ packages; the Linux build is the primary tested target.
 - Draw with a graphics tablet. On Wayland, Romo reads the pen through the tablet protocol, so it works in compositors such as Hyprland that don't turn pens into a mouse, including with OpenTabletDriver's artist mode. The pen acts like a mouse: the tip clicks and draws, the lower barrel button pans, and the upper one opens the object toolbar. Pressure is not used.
 - Scale drawings: select one or more pen strokes and drag the corner handle. Scaling is uniform; hold Shift to stretch freely. Strokes keep their drawn width when a drawing grows and thin out when it shrinks below its drawn size.
 - Move and resize objects. Drag a frame to move its contained objects.
-- Select several objects with Shift-click or a selection box. Drag anywhere inside existing selection bounds to move them, including empty space around a drawing.
+- Select several objects with Shift-click or a selection box; they share one outline around their combined bounds. Drag anywhere inside existing selection bounds to move them, including empty space around a drawing.
 - Click with the text tool for a text box that grows with what you type, or drag out a box to wrap text at its width. A text box left empty disappears.
 - Add text or double-click an object to edit directly on the canvas. Text updates and saves as you type; click elsewhere, press Escape, or press Ctrl+Enter to finish. The native editor supports Unicode, text selection, clipboard operations, and IME composition. Each editing session is one undo step.
 - Right-click an object or selection for a horizontal icon toolbar with color, text, dimensions, line width, layering, duplicate, and delete controls. Shift+F10 also opens it.

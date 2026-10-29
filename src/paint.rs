@@ -345,6 +345,31 @@ pub fn outline(window: &mut Window, r: Rect, color: u32) {
     ));
 }
 
+/// `r` with its edges moved onto whole device pixels.
+fn pixel_aligned(window: &Window, r: Rect) -> Rect {
+    let scale = window.scale_factor();
+    let snap = |v: f32| (v * scale).round() / scale;
+    Rect::from_min_max(
+        pos2(snap(r.min.x), snap(r.min.y)),
+        pos2(snap(r.max.x), snap(r.max.y)),
+    )
+}
+
+/// An outline that stays sharp while the board pans or zooms. GPUI
+/// antialiases a line at a fractional position across two pixels, which
+/// shimmers as it moves, so this one sits on whole device pixels.
+fn crisp_outline(window: &mut Window, r: Rect, color: u32) {
+    let scale = window.scale_factor();
+    window.paint_quad(quad(
+        bounds(pixel_aligned(window, r)),
+        px(0.0),
+        gpui::transparent_black(),
+        px(scale.round().max(1.0) / scale),
+        rgb(color),
+        gpui::BorderStyle::Solid,
+    ));
+}
+
 pub struct Overlay<'a> {
     pub selected: &'a HashSet<u64>,
     /// Bounds with resize or scale handles, and the corners that have them.
@@ -646,31 +671,22 @@ pub fn board(
                     },
                 );
             }
-            let chosen: Vec<Rect> = board
+            // Several objects share one outline around their combined bounds.
+            if let Some(r) = board
                 .items
                 .iter()
                 .filter(|item| selected.contains(&item.id))
                 .map(item_rect)
-                .collect();
-            for r in &chosen {
-                outline(window, view.screen_rect(*r, canvas).expand(4.0), FG);
-            }
-            if chosen.len() > 1
-                && let Some(r) = chosen.iter().copied().reduce(|a, b| a.union(b))
+                .reduce(|a, b| a.union(b))
             {
-                outline(window, view.screen_rect(r, canvas).expand(4.0), FG);
+                crisp_outline(window, view.screen_rect(r, canvas).expand(4.0), FG);
             }
             if let Some((r, corners)) = handles {
                 // Handles sit on the corners of the selection outline.
                 let around = view.screen_rect(r, canvas).expand(4.0);
                 for corner in corners {
-                    rect(
-                        window,
-                        Rect::from_center_size(corner.of(around), vec2(8.0, 8.0)),
-                        FG,
-                        None,
-                        1.0,
-                    );
+                    let handle = Rect::from_center_size(corner.of(around), vec2(8.0, 8.0));
+                    rect(window, pixel_aligned(window, handle), FG, None, 1.0);
                 }
             }
             for guide in guides {

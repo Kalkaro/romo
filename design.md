@@ -26,7 +26,7 @@ Every floating control, menu, popup, and minimap must block pointer events from 
 
 ## Selection and drawing
 
-Use thin white selection bounds, square resize handles, and a low-opacity marquee. For multiple objects, show their combined bounds. Dragging **anywhere inside an existing selection rectangle** moves the selection, including empty space around freehand strokes. Moving a group preserves relative positions.
+Use thin white selection bounds, square resize handles, and a low-opacity marquee. Draw selection bounds and handles on whole device pixels so they stay sharp while the board pans or zooms. For multiple objects, show only their combined bounds, not each object's own. Dragging **anywhere inside an existing selection rectangle** moves the selection, including empty space around freehand strokes. Moving a group preserves relative positions.
 
 New pen strokes, connectors, and shapes are not selected automatically. Pen curves use smooth quadratic segments with round caps and joins; taps create dots. Explicitly selecting a drawing displays its selection rectangle normally. While a note or text box is being dragged out, it shows no placeholder.
 
