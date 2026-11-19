@@ -23,7 +23,7 @@ nix run
 From another directory:
 
 ```sh
-nix run /home/erop/Documents/personalstuff/romo
+nix run github:Kalkaro/romo
 ```
 
 Open a saved board:
